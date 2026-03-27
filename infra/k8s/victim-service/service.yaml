@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: victim-service
+  namespace: app
+  labels:
+    app: victim-service
+spec:
+  selector:
+    app: victim-service
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+  type: ClusterIP
