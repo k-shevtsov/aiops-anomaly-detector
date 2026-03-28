@@ -42,7 +42,7 @@ def collect_metrics() -> dict[str, float]:
         metrics[name] = fetch_metric(query)
     return metrics
 
-def collect_features(m: dict) -> np.ndarray:
+def collect_features(m: dict[str, float]) -> np.ndarray:
     return np.array([[
         m["error_rate"],
         m["request_rate"],
