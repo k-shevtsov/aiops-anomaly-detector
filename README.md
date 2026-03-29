@@ -103,13 +103,6 @@ pytest tests/ -v
 | `COOLDOWN_SECONDS` | 900 | Cooldown between healing actions |
 | `MAX_CLAUDE_CALLS_PER_HOUR` | 10 | Claude API rate limit |
 
-## CV Entry (DE)
-
-> Entwickelte eine AIOps-Plattform auf Kubernetes mit Isolation Forest
-> (scikit-learn) zur ML-basierten Anomalieerkennung vor dem Alert-Firing,
-> Claude API für LLM-Erklärungen und automatischem Self-Healing via
-> Kubernetes SDK. Stack: k3d, ArgoCD, Prometheus, Grafana, Chaos Mesh,
-> FastAPI, Helm. 92 Unit-Tests.
 
 ## Repository
 
