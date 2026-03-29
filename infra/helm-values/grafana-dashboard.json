@@ -1,0 +1,172 @@
+{
+  "dashboard": {
+    "title": "AIOps Anomaly Detector",
+    "uid": "anomaly-detector",
+    "timezone": "browser",
+    "refresh": "10s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Anomaly Score",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "anomaly_detector_score",
+            "legendFormat": "score"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": -0.5},
+                {"color": "red", "value": -0.7}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Anomalies Detected Total",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "anomaly_detector_detected_total"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Healing Cooldown Active",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "anomaly_healing_cooldown_active"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {
+                "0": {"text": "READY", "color": "green"},
+                "1": {"text": "COOLDOWN", "color": "orange"}
+              }}
+            ]
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Healing Actions",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "rate(anomaly_healing_total[5m])",
+            "legendFormat": "{{action}} / {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Healing Duration (p95)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "histogram_quantile(0.95, rate(anomaly_healing_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "LLM Calls Total",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "explainer_llm_calls_total"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "LLM Errors Total",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "explainer_llm_errors_total"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "LLM Rate Limit Blocked",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "explainer_rate_limit_blocked"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {
+                "0": {"text": "OK", "color": "green"},
+                "1": {"text": "BLOCKED", "color": "red"}
+              }}
+            ]
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Telegram Notifications",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "rate(notifier_sent_total[5m])",
+            "legendFormat": "sent"
+          },
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "rate(notifier_failed_total[5m])",
+            "legendFormat": "failed"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Victim Service Error Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+        "targets": [
+          {
+            "datasource": {"type": "prometheus"},
+            "expr": "rate(http_requests_total{job=\"victim-service\",status=\"500\"}[1m])",
+            "legendFormat": "error rate"
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true,
+  "folderId": 0
+}
