@@ -39,7 +39,11 @@ def fetch_metric(query: str) -> float:
 def collect_metrics() -> dict[str, float]:
     metrics = {}
     for name, query in QUERIES.items():
-        metrics[name] = fetch_metric(query)
+        try:
+            metrics[name] = fetch_metric(query)
+        except Exception as e:
+            print(f"[collect_metrics] Unexpected error for {name}: {e}")
+            metrics[name] = 0.0
     return metrics
 
 def collect_features(m: dict[str, float]) -> np.ndarray:

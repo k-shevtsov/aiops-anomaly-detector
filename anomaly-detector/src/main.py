@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import logging
 from contextlib import asynccontextmanager, suppress
@@ -11,6 +12,9 @@ from prometheus_client import make_asgi_app
 
 from collector import collect_metrics, collect_features
 from model import AnomalyDetector
+from explainer import explain_anomaly
+from healer import rollout_restart
+from notifier import notify_anomaly
 
 load_dotenv()
 
@@ -30,7 +34,59 @@ app_state = {
     "phase": "training",
     "training_start": None,
     "anomalies_detected": 0,
+    "active_tasks": 0,
 }
+
+
+def _make_incident_id(score: float, timestamp: datetime) -> str:
+    """Generate stable incident ID from score + minute-level timestamp."""
+    raw = f"{timestamp.strftime('%Y%m%d%H%M')}:{score:.3f}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:10]
+
+
+async def handle_anomaly(
+    score: float,
+    metrics: dict[str, float],
+    incident_id: str,
+) -> None:
+    """Run explain → heal → notify in background without blocking detection loop."""
+    app_state["active_tasks"] += 1
+    try:
+        # 1. LLM explanation
+        explanation = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: explain_anomaly(
+                score=score,
+                threshold=detector.threshold,
+                metrics=metrics,
+                baseline=detector.baseline,
+                incident_id=incident_id,
+            )
+        )
+        log.info("[%s] Explanation: %s", incident_id, explanation)
+
+        # 2. Self-healing
+        healing_performed = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: rollout_restart(incident_id=incident_id)
+        )
+
+        # 3. Notify
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: notify_anomaly(
+                score=score,
+                threshold=detector.threshold,
+                metrics=metrics,
+                explanation=explanation,
+                healing_performed=healing_performed,
+                incident_id=incident_id,
+            )
+        )
+    except Exception as e:
+        log.error("[%s] handle_anomaly failed: %s", incident_id, e)
+    finally:
+        app_state["active_tasks"] -= 1
 
 
 async def training_phase():
@@ -44,9 +100,7 @@ async def training_phase():
     )
 
     elapsed = 0
-
     while elapsed < MAX_TRAINING_SECONDS:
-        # Single Prometheus round-trip: reuse metrics dict for features
         metrics = collect_metrics()
         features = collect_features(metrics)
         detector.add_training_sample(features)
@@ -57,7 +111,6 @@ async def training_phase():
         )
 
         elapsed += SCRAPE_INTERVAL_SECONDS
-
         enough_samples = len(detector.training_data) >= MIN_TRAINING_SAMPLES
         enough_time = elapsed >= MIN_TRAINING_SECONDS
 
@@ -82,26 +135,29 @@ async def training_phase():
 
 
 async def inference_phase():
-    """Detect anomalies every SCRAPE_INTERVAL_SECONDS."""
+    """Detect anomalies every SCRAPE_INTERVAL_SECONDS. Offload handling to background tasks."""
     app_state["phase"] = "inference"
     log.info("=== INFERENCE PHASE STARTED ===")
 
     while True:
-        # Single Prometheus round-trip
         metrics = collect_metrics()
         features = collect_features(metrics)
-
         score, is_anomaly = detector.predict(features)
 
-        # Always log score for observability — useful for Loki dashboards and drift detection
         log.info("score=%.3f threshold=%.3f anomaly=%s", score, detector.threshold, is_anomaly)
 
         if is_anomaly:
             app_state["anomalies_detected"] += 1
+            now = datetime.now(timezone.utc)
+            incident_id = _make_incident_id(score, now)
+
             log.warning(
-                "ANOMALY DETECTED! score=%.3f threshold=%.3f metrics=%s",
-                score, detector.threshold, metrics
+                "ANOMALY DETECTED! score=%.3f threshold=%.3f incident_id=%s metrics=%s",
+                score, detector.threshold, incident_id, metrics
             )
+
+            # Fire and forget — does not block detection loop
+            asyncio.create_task(handle_anomaly(score, metrics, incident_id))
 
         await asyncio.sleep(SCRAPE_INTERVAL_SECONDS)
 
@@ -121,7 +177,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AIOps Anomaly Detector", lifespan=lifespan)
-
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
@@ -149,6 +204,7 @@ async def status():
         "is_trained": detector.is_trained,
         "baseline": detector.baseline,
         "anomalies_detected": app_state["anomalies_detected"],
+        "active_tasks": app_state["active_tasks"],
         "threshold": detector.threshold,
     }
 
