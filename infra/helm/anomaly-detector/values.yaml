@@ -1,0 +1,48 @@
+replicaCount: 1
+
+image:
+  repository: anomaly-detector
+  tag: local
+  pullPolicy: Never
+
+containerPort: 8001
+
+env:
+  prometheusUrl: "http://monitoring-kube-prometheus-prometheus.monitoring:9090"
+  minTrainingSamples: "20"
+  minTrainingSeconds: "600"
+  scrapeIntervalSeconds: "30"
+  healingEnabled: "true"
+  cooldownSeconds: "900"
+  targetNamespace: "app"
+  targetDeployment: "victim-service"
+  claudeModel: "claude-sonnet-4-5-20250929"
+  maxClaudeCallsPerHour: "10"
+
+secretName: anomaly-detector-secrets
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+livenessProbe:
+  path: /health/live
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  path: /health/ready
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  failureThreshold: 3
+
+serviceAccount:
+  create: true
+
+rbac:
+  create: true

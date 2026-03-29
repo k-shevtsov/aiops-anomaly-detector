@@ -1,0 +1,6 @@
+apiVersion: v2
+name: anomaly-detector
+description: AIOps Self-Healing Kubernetes with Isolation Forest and LLM explanations
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

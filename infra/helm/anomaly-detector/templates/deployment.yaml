@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anomaly-detector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "anomaly-detector.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "anomaly-detector.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anomaly-detector.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "anomaly-detector.fullname" . }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PROMETHEUS_URL
+              value: {{ .Values.env.prometheusUrl | quote }}
+            - name: MIN_TRAINING_SAMPLES
+              value: {{ .Values.env.minTrainingSamples | quote }}
+            - name: MIN_TRAINING_SECONDS
+              value: {{ .Values.env.minTrainingSeconds | quote }}
+            - name: SCRAPE_INTERVAL_SECONDS
+              value: {{ .Values.env.scrapeIntervalSeconds | quote }}
+            - name: HEALING_ENABLED
+              value: {{ .Values.env.healingEnabled | quote }}
+            - name: COOLDOWN_SECONDS
+              value: {{ .Values.env.cooldownSeconds | quote }}
+            - name: TARGET_NAMESPACE
+              value: {{ .Values.env.targetNamespace | quote }}
+            - name: TARGET_DEPLOYMENT
+              value: {{ .Values.env.targetDeployment | quote }}
+            - name: CLAUDE_MODEL
+              value: {{ .Values.env.claudeModel | quote }}
+            - name: MAX_CLAUDE_CALLS_PER_HOUR
+              value: {{ .Values.env.maxClaudeCallsPerHour | quote }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: anthropic-api-key
+            - name: TELEGRAM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: telegram-token
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: telegram-chat-id
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
