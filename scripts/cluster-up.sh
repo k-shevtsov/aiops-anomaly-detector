@@ -56,7 +56,6 @@ fi
 # ---------------------------------------------------------
 echo -e "${YELLOW}[ACTION] Recreating k3d cluster '${CLUSTER_NAME}'...${NC}"
 k3d cluster delete $CLUSTER_NAME 2>/dev/null || true
-
 k3d cluster create $CLUSTER_NAME \
   --port "80:80@loadbalancer" \
   --agents 2
@@ -66,9 +65,12 @@ k3d cluster create $CLUSTER_NAME \
 # ---------------------------------------------------------
 echo -e "${BLUE}[INFO] Creating namespace 'app'...${NC}"
 kubectl create namespace app 2>/dev/null || true
+kubectl create namespace ai-engine 2>/dev/null || true
 
 echo -e "${BLUE}[INFO] Importing local Docker image into cluster...${NC}"
 k3d image import victim-service:local -c $CLUSTER_NAME
+k3d image import anomaly-detector:local -c $CLUSTER_NAME 2>/dev/null || \
+echo "[WARN] anomaly-detector:local not found, skipping"
 
 # ---------------------------------------------------------
 # Install kube-prometheus-stack (offline)
@@ -77,7 +79,7 @@ echo -e "${GREEN}[STEP] Installing monitoring stack (kube-prometheus-stack)...${
 helm upgrade --install monitoring "$LOCAL_HELM_DIR"/kube-prometheus-stack-*.tgz \
   --namespace monitoring --create-namespace \
   --values "$VALUES_PATH" \
-  --timeout 12m
+  --timeout 12m --wait
 
 # ---------------------------------------------------------
 # Install ArgoCD (minimal version)
@@ -104,7 +106,7 @@ helm upgrade --install argocd "$LOCAL_HELM_DIR"/argo-cd-*.tgz \
   --set redis.enabled=false \
   --set notifications.enabled=false \
   --set controller.enableStatefulSet=false \
-  --timeout 15m
+  --timeout 15m --wait
 
 # ---------------------------------------------------------
 # Install Chaos Mesh (offline)
@@ -114,7 +116,7 @@ helm upgrade --install chaos-mesh "$LOCAL_HELM_DIR"/chaos-mesh-*.tgz \
   --namespace chaos-mesh --create-namespace \
   --set chaosDaemon.runtime=containerd \
   --set chaosDaemon.socketPath=/run/k3s/containerd/containerd.sock \
-  --timeout 8m
+  --timeout 8m --wait
 
 # ---------------------------------------------------------
 # Deploy victim-service

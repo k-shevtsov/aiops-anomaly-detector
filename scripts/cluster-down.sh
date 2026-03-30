@@ -107,7 +107,7 @@ kubectl delete mutatingwebhookconfiguration --all 2>/dev/null || true
 # Delete k3d cluster
 # ---------------------------------------------------------
 echo -e "${YELLOW}[ACTION] Deleting k3d cluster '${CLUSTER_NAME}'...${NC}"
-k3d cluster delete $CLUSTER_NAME --wait || true
+k3d cluster delete $CLUSTER_NAME || true
 
 echo -e "${GREEN}[DONE] Cluster teardown complete.${NC}"
 
