@@ -60,6 +60,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: telegram-chat-id
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: langfuse-public-key
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: langfuse-secret-key
+            - name: LANGFUSE_HOST
+              value: {{ .Values.env.langfuseHost | quote }}
           livenessProbe:
             httpGet:
               path: {{ .Values.livenessProbe.path }}

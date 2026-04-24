@@ -18,8 +18,15 @@ env:
   targetDeployment: "victim-service"
   claudeModel: "claude-sonnet-4-5-20250929"
   maxClaudeCallsPerHour: "10"
+  langfuseHost: "https://cloud.langfuse.com"
 
 secretName: anomaly-detector-secrets
+
+# Langfuse secret keys — должны совпадать с ключами в K8s Secret.
+# Сами значения хранятся в секрете, здесь только имена ключей.
+langfuseSecretKeys:
+  publicKey: "langfuse-public-key"
+  secretKey: "langfuse-secret-key"
 
 resources:
   requests:

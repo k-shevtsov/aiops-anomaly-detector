@@ -1,138 +1,65 @@
-#!/bin/bash
-set -e
-trap 'echo -e "\033[0;31m[ERROR]\033[0m Script failed. Press Enter to exit..."; read' ERR
-
-# ---------------------------------------------------------
-# Colors for readable output
-# ---------------------------------------------------------
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[0;34m"
-NC="\033[0m" # no color
-
-# ---------------------------------------------------------
-# Determine repository root (one level above scripts/)
-# ---------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-echo -e "${BLUE}[INFO] Script directory: $SCRIPT_DIR${NC}"
-echo -e "${BLUE}[INFO] Repository root: $REPO_ROOT${NC}"
-
-# Paths to values and manifests
-VALUES_PATH="$REPO_ROOT/infra/helm-values/prometheus-values.yaml"
-VICTIM_MANIFESTS="$REPO_ROOT/infra/k8s/victim-service/"
+#!/usr/bin/env bash
+set -euo pipefail
 
 CLUSTER_NAME="aiops"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
 
-echo -e "${GREEN}[STEP] Starting cluster setup...${NC}"
+echo "[STEP] Building victim-service Docker image..."
+docker build -t victim-service:local ./infra/k8s/victim-service
 
-# ---------------------------------------------------------
-# Local Helm chart storage (offline installation)
-# ---------------------------------------------------------
-LOCAL_HELM_DIR="$HOME/helm-local"
-
-echo -e "${BLUE}[INFO] Ensuring local Helm chart directory exists at $LOCAL_HELM_DIR...${NC}"
-mkdir -p "$LOCAL_HELM_DIR"
-
-# Download charts once (offline mode afterwards)
-if ! ls "$LOCAL_HELM_DIR"/kube-prometheus-stack-*.tgz >/dev/null 2>&1; then
-  echo -e "${BLUE}[INFO] Downloading kube-prometheus-stack chart...${NC}"
-  helm pull prometheus-community/kube-prometheus-stack -d "$LOCAL_HELM_DIR"
+echo "[STEP] Recreating k3d cluster '${CLUSTER_NAME}'..."
+if k3d cluster list | grep -q "^${CLUSTER_NAME}"; then
+  k3d cluster delete "${CLUSTER_NAME}" || true
 fi
 
-if ! ls "$LOCAL_HELM_DIR"/argo-cd-*.tgz >/dev/null 2>&1; then
-  echo -e "${BLUE}[INFO] Downloading argo-cd chart...${NC}"
-  helm pull argo/argo-cd -d "$LOCAL_HELM_DIR"
-fi
-
-if ! ls "$LOCAL_HELM_DIR"/chaos-mesh-*.tgz >/dev/null 2>&1; then
-  echo -e "${BLUE}[INFO] Downloading chaos-mesh chart...${NC}"
-  helm pull chaos-mesh/chaos-mesh -d "$LOCAL_HELM_DIR"
-fi
-
-# ---------------------------------------------------------
-# Recreate k3d cluster
-# ---------------------------------------------------------
-echo -e "${YELLOW}[ACTION] Recreating k3d cluster '${CLUSTER_NAME}'...${NC}"
-k3d cluster delete $CLUSTER_NAME 2>/dev/null || true
-k3d cluster create $CLUSTER_NAME \
+k3d cluster create "${CLUSTER_NAME}" \
+  --agents 2 \
   --port "80:80@loadbalancer" \
-  --agents 2
+  --k3s-arg "--disable=traefik@server:0" \
+  --wait
 
-# ---------------------------------------------------------
-# Create namespace and import local Docker image
-# ---------------------------------------------------------
-echo -e "${BLUE}[INFO] Creating namespace 'app'...${NC}"
-kubectl create namespace app 2>/dev/null || true
-kubectl create namespace ai-engine 2>/dev/null || true
+echo "[STEP] Importing victim-service image into cluster..."
+k3d image import victim-service:local -c "${CLUSTER_NAME}"
 
-echo -e "${BLUE}[INFO] Importing local Docker image into cluster...${NC}"
-k3d image import victim-service:local -c $CLUSTER_NAME
-k3d image import anomaly-detector:local -c $CLUSTER_NAME 2>/dev/null || \
-echo "[WARN] anomaly-detector:local not found, skipping"
+echo "[STEP] Creating namespaces..."
+kubectl create namespace app        --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace ai-engine  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-# ---------------------------------------------------------
-# Install kube-prometheus-stack (offline)
-# ---------------------------------------------------------
-echo -e "${GREEN}[STEP] Installing monitoring stack (kube-prometheus-stack)...${NC}"
-helm upgrade --install monitoring "$LOCAL_HELM_DIR"/kube-prometheus-stack-*.tgz \
+echo "[STEP] Installing kube-prometheus-stack..."
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+helm repo update
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
   --namespace monitoring --create-namespace \
-  --values "$VALUES_PATH" \
-  --timeout 12m --wait
+  --wait --timeout 5m
 
-# ---------------------------------------------------------
-# Install ArgoCD (minimal version)
-#
-# Why minimal:
-# - Dex is disabled (no SSO)
-# - Redis is disabled (lighter footprint)
-# - Notifications disabled
-# - Faster installation, fewer CRDs, fewer webhooks
-#
-# Why single release:
-# - ArgoCD Helm chart does NOT support CRD-only release
-#   (CRD-only mode still creates resources and breaks ownership)
-# - Therefore we install everything in one Helm release
-#   with extended timeout to allow CRD registration
-# ---------------------------------------------------------
+echo "[STEP] Installing ArgoCD..."
+helm repo add argo https://argoproj.github.io/argo-helm 2>/dev/null || true
+helm repo update
+helm upgrade --install argocd argo/argo-cd \
+  --namespace argocd --create-namespace
 
-echo -e "${GREEN}[STEP] Installing ArgoCD (minimal configuration)...${NC}"
+echo "[STEP] Installing Chaos Mesh..."
+helm repo add chaos-mesh https://charts.chaos-mesh.org 2>/dev/null || true
+helm repo update
+helm upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
+  --namespace chaos-mesh --create-namespace
 
-helm upgrade --install argocd "$LOCAL_HELM_DIR"/argo-cd-*.tgz \
-  --namespace argocd --create-namespace \
-  --set server.service.type=ClusterIP \
-  --set dex.enabled=false \
-  --set redis.enabled=false \
-  --set notifications.enabled=false \
-  --set controller.enableStatefulSet=false \
-  --timeout 15m --wait
+echo "[STEP] Applying victim-service manifests..."
+kubectl apply -f infra/k8s/victim-service/
 
-# ---------------------------------------------------------
-# Install Chaos Mesh (offline)
-# ---------------------------------------------------------
-echo -e "${GREEN}[STEP] Installing Chaos Mesh...${NC}"
-helm upgrade --install chaos-mesh "$LOCAL_HELM_DIR"/chaos-mesh-*.tgz \
-  --namespace chaos-mesh --create-namespace \
-  --set chaosDaemon.runtime=containerd \
-  --set chaosDaemon.socketPath=/run/k3s/containerd/containerd.sock \
-  --timeout 8m --wait
+echo "[INFO] Waiting for victim-service pods..."
+kubectl wait --for=condition=ready pod \
+  -l app=victim-service -n app --timeout=180s || {
+  echo "[WARN] Pods not Ready after timeout:"
+  kubectl get pods -n app
+  kubectl describe pod -n app -l app=victim-service || true
+  kubectl logs -n app -l app=victim-service --tail=50 || true
+  exit 1
+}
 
-# ---------------------------------------------------------
-# Deploy victim-service
-# ---------------------------------------------------------
-echo -e "${GREEN}[STEP] Applying victim-service manifests...${NC}"
-kubectl apply -f "$VICTIM_MANIFESTS"
+echo "[STEP] Starting port-forwards..."
+./scripts/port-forwards.sh &>/dev/null &
 
-echo -e "${BLUE}[INFO] Waiting for victim-service pods to become Ready...${NC}"
-kubectl wait --for=condition=Ready pod \
-  -l app=victim-service -n app --timeout=120s
-
-# ---------------------------------------------------------
-# Final message
-# ---------------------------------------------------------
-echo -e "${GREEN}[DONE] Cluster is ready.${NC}"
-echo -e "${BLUE}To access services, run:${NC}"
-echo "  kubectl port-forward svc/monitoring-kube-prometheus-prometheus -n monitoring 9090:9090 &"
-echo "  kubectl port-forward svc/victim-service -n app 8000:80 &"
-
+echo "[DONE] Cluster is up. victim-service deployed."
