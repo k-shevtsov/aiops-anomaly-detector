@@ -10,11 +10,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 
-from collector import collect_metrics, collect_features
-from model import AnomalyDetector
-from explainer import explain_anomaly
-from healer import rollout_restart
-from notifier import notify_anomaly
+from src.collector import collect_metrics, collect_features
+from src.model import AnomalyDetector
+from src.agent import run_agent, AgentResult        # ← replaces explain_anomaly + rollout_restart
+from src.notifier import notify_anomaly
 
 load_dotenv()
 
@@ -24,17 +23,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-MIN_TRAINING_SAMPLES = int(os.getenv("MIN_TRAINING_SAMPLES", "20"))
-MIN_TRAINING_SECONDS = int(os.getenv("MIN_TRAINING_SECONDS", "600"))
-MAX_TRAINING_SECONDS = int(os.getenv("MAX_TRAINING_SECONDS", "1800"))
+MIN_TRAINING_SAMPLES    = int(os.getenv("MIN_TRAINING_SAMPLES",    "20"))
+MIN_TRAINING_SECONDS    = int(os.getenv("MIN_TRAINING_SECONDS",    "600"))
+MAX_TRAINING_SECONDS    = int(os.getenv("MAX_TRAINING_SECONDS",    "1800"))
 SCRAPE_INTERVAL_SECONDS = int(os.getenv("SCRAPE_INTERVAL_SECONDS", "30"))
 
-detector = AnomalyDetector(min_training_samples=MIN_TRAINING_SAMPLES)
+detector  = AnomalyDetector(min_training_samples=MIN_TRAINING_SAMPLES)
 app_state = {
-    "phase": "training",
-    "training_start": None,
+    "phase":              "training",
+    "training_start":     None,
     "anomalies_detected": 0,
-    "active_tasks": 0,
+    "active_tasks":       0,
 }
 
 
@@ -45,79 +44,95 @@ def _make_incident_id(score: float, timestamp: datetime) -> str:
 
 
 async def handle_anomaly(
-    score: float,
-    metrics: dict[str, float],
+    score:       float,
+    metrics:     dict[str, float],
     incident_id: str,
 ) -> None:
-    """Run explain → heal → notify in background without blocking detection loop."""
+    """
+    Run agentic analysis → notify.
+
+    Claude now decides autonomously:
+      - what Prometheus queries to run
+      - whether to inspect pod logs
+      - whether to trigger a rollout restart
+
+    The AgentResult carries all structured output (severity, root_cause, etc.)
+    for the notifier to use.
+    """
     app_state["active_tasks"] += 1
     try:
-        # 1. LLM explanation
-        explanation = await asyncio.get_event_loop().run_in_executor(
+        # Agentic loop — Claude reasons over live data with tool access
+        result: AgentResult = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: explain_anomaly(
-                score=score,
-                threshold=detector.threshold,
-                metrics=metrics,
-                baseline=detector.baseline,
-                incident_id=incident_id,
+            lambda: run_agent(
+                score       = score,
+                threshold   = detector.threshold,
+                metrics     = metrics,
+                baseline    = detector.baseline,
+                incident_id = incident_id,
             )
         )
-        log.info("[%s] Explanation: %s", incident_id, explanation)
 
-        # 2. Self-healing
-        healing_performed = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: rollout_restart(incident_id=incident_id)
+        log.info(
+            "[%s] Agent result: severity=%s healing=%s tool_calls=%d fallback=%s",
+            incident_id,
+            result.severity,
+            result.healing_performed,
+            result.tool_calls_made,
+            result.fallback,
         )
+        log.info("[%s] Root cause:  %s", incident_id, result.root_cause or "(unknown)")
+        log.info("[%s] Explanation: %s", incident_id, result.explanation)
 
-        # 3. Notify
+        # Notify — pass structured fields so the notifier can format a richer message
         await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: notify_anomaly(
-                score=score,
-                threshold=detector.threshold,
-                metrics=metrics,
-                explanation=explanation,
-                healing_performed=healing_performed,
-                incident_id=incident_id,
+                score              = score,
+                threshold          = detector.threshold,
+                metrics            = metrics,
+                explanation        = result.explanation,
+                healing_performed  = result.healing_performed,
+                incident_id        = incident_id,
+                # Extended fields available for notifier to use if desired:
+                severity           = result.severity,
+                root_cause         = result.root_cause,
+                recommended_action = result.recommended_action,
+                actions_taken      = result.actions_taken,
             )
         )
-    except Exception as e:
-        log.error("[%s] handle_anomaly failed: %s", incident_id, e)
+    except Exception as exc:
+        log.error("[%s] handle_anomaly failed: %s", incident_id, exc)
     finally:
         app_state["active_tasks"] -= 1
 
 
 async def training_phase():
     """Collect baseline until both MIN_TRAINING_SAMPLES and MIN_TRAINING_SECONDS are met."""
-    app_state["phase"] = "training"
+    app_state["phase"]          = "training"
     app_state["training_start"] = datetime.now(timezone.utc)
     log.info("=== TRAINING PHASE STARTED ===")
     log.info(
         "Target: >= %d samples AND >= %ds (fail-safe: %ds)",
-        MIN_TRAINING_SAMPLES, MIN_TRAINING_SECONDS, MAX_TRAINING_SECONDS
+        MIN_TRAINING_SAMPLES, MIN_TRAINING_SECONDS, MAX_TRAINING_SECONDS,
     )
 
     elapsed = 0
     while elapsed < MAX_TRAINING_SECONDS:
-        metrics = collect_metrics()
+        metrics  = collect_metrics()
         features = collect_features(metrics)
         detector.add_training_sample(features)
 
         log.info(
             "Training sample #%d collected (elapsed=%ds, target=%ds)",
-            len(detector.training_data), elapsed, MIN_TRAINING_SECONDS
+            len(detector.training_data), elapsed, MIN_TRAINING_SECONDS,
         )
 
         elapsed += SCRAPE_INTERVAL_SECONDS
-        enough_samples = len(detector.training_data) >= MIN_TRAINING_SAMPLES
-        enough_time = elapsed >= MIN_TRAINING_SECONDS
-
-        if enough_samples and enough_time:
+        if len(detector.training_data) >= MIN_TRAINING_SAMPLES and elapsed >= MIN_TRAINING_SECONDS:
             log.info(
-                "Conditions met: %d samples, %ds elapsed — training model...",
-                len(detector.training_data), elapsed
+                "Conditions met: %d samples, %ds elapsed — training model…",
+                len(detector.training_data), elapsed,
             )
             if detector.train():
                 log.info("Training successful.")
@@ -140,7 +155,7 @@ async def inference_phase():
     log.info("=== INFERENCE PHASE STARTED ===")
 
     while True:
-        metrics = collect_metrics()
+        metrics  = collect_metrics()
         features = collect_features(metrics)
         score, is_anomaly = detector.predict(features)
 
@@ -148,12 +163,12 @@ async def inference_phase():
 
         if is_anomaly:
             app_state["anomalies_detected"] += 1
-            now = datetime.now(timezone.utc)
+            now         = datetime.now(timezone.utc)
             incident_id = _make_incident_id(score, now)
 
             log.warning(
                 "ANOMALY DETECTED! score=%.3f threshold=%.3f incident_id=%s metrics=%s",
-                score, detector.threshold, incident_id, metrics
+                score, detector.threshold, incident_id, metrics,
             )
 
             # Fire and forget — does not block detection loop
@@ -180,6 +195,9 @@ app = FastAPI(title="AIOps Anomaly Detector", lifespan=lifespan)
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/health/live")
 async def liveness():
@@ -189,9 +207,9 @@ async def liveness():
 @app.get("/health/ready")
 async def readiness():
     return {
-        "status": "ok",
-        "phase": app_state["phase"],
-        "is_trained": detector.is_trained,
+        "status":             "ok",
+        "phase":              app_state["phase"],
+        "is_trained":         detector.is_trained,
         "anomalies_detected": app_state["anomalies_detected"],
     }
 
@@ -199,13 +217,13 @@ async def readiness():
 @app.get("/status")
 async def status():
     return {
-        "phase": app_state["phase"],
-        "training_samples": len(detector.training_data),
-        "is_trained": detector.is_trained,
-        "baseline": detector.baseline,
+        "phase":              app_state["phase"],
+        "training_samples":   len(detector.training_data),
+        "is_trained":         detector.is_trained,
+        "baseline":           detector.baseline,
         "anomalies_detected": app_state["anomalies_detected"],
-        "active_tasks": app_state["active_tasks"],
-        "threshold": detector.threshold,
+        "active_tasks":       app_state["active_tasks"],
+        "threshold":          detector.threshold,
     }
 
 
