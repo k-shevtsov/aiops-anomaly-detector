@@ -24,6 +24,14 @@ import anthropic
 import requests
 from prometheus_client import Counter, Histogram, Counter as _C
 
+# ── RAG (Tier-2) — graceful no-op if rag module unavailable ─────────────────
+try:
+    from rag import get_store, store_resolved_incident
+    _rag_enabled = True
+except ImportError:
+    _rag_enabled = False
+    def store_resolved_incident(*a, **kw): pass  # type: ignore[misc]
+
 # ── Langfuse (optional — graceful no-op when not configured) ────────────────
 # Set LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY + LANGFUSE_HOST in env.
 # If keys are absent the _Tracer below is a no-op context manager — zero
@@ -503,6 +511,21 @@ def run_agent(
         f"Investigate using the available tools and remediate if warranted."
     )
 
+    # ── RAG: inject similar past incidents as few-shot examples ─────────────
+    if _rag_enabled:
+        try:
+            store    = get_store()
+            few_shot = store.retrieve_as_few_shot(initial_user_message)
+            if few_shot:
+                initial_user_message += f"\n\n{few_shot}"
+                count = few_shot.count("[Past incident")
+                log.info("[%s] RAG injected %d similar past incident(s)", incident_id, count)
+            else:
+                log.info("[%s] RAG store empty — no few-shot context yet (incident #%d)",
+                         incident_id, store.count() + 1)
+        except Exception as exc:
+            log.warning("[%s] RAG retrieval failed (non-fatal): %s", incident_id, exc)
+
     messages: list[dict] = [{"role": "user", "content": initial_user_message}]
     actions_taken: list[str] = []
     healing_performed = False
@@ -574,6 +597,8 @@ def run_agent(
                     )
                     tracer.end_span(iter_span, output={"stop_reason": "end_turn"})
                     tracer.finalise(result)
+                    # ── RAG: persist for future retrieval ────────────────────
+                    store_resolved_incident(result, score, metrics, incident_id)
                     return result
 
                 # ── Unexpected stop ──────────────────────────────────────────
