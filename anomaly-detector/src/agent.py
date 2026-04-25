@@ -95,9 +95,10 @@ class _Tracer:
                     as_type       = "agent",
                     input         = {"score": self._score, "metrics": self._metrics},
                     metadata      = {
-                        "model":      CLAUDE_MODEL,
-                        "deployment": TARGET_DEPLOYMENT,
-                        "namespace":  TARGET_NAMESPACE,
+                        "model":          CLAUDE_MODEL,
+                        "deployment":     TARGET_DEPLOYMENT,
+                        "namespace":      TARGET_NAMESPACE,
+                        "prompt_version": PROMPT_VERSION,
                     },
                 )
             except Exception as exc:
@@ -473,8 +474,19 @@ def _execute_tool(tool_name: str, tool_input: dict, incident_id: str) -> str:
 
 
 # ── System prompt ────────────────────────────────────────────────────────────
+# Prompt is versioned in prompts/agent_system.md — see PROMPTS.md for rationale.
+# We load it from the file at import time so edits to the .md are picked up
+# on container restart without changing Python code.
 
-_SYSTEM = """\
+PROMPT_VERSION = "agent_system@1.2.0"   # bump when prompts/agent_system.md changes
+
+def _load_system_prompt() -> str:
+    """
+    Load system prompt from prompts/agent_system.md if available.
+    Falls back to the inline string so the module works without the file
+    (e.g. in unit tests or when the prompts/ dir is not mounted).
+    """
+    _inline = """\
 You are an autonomous SRE agent with tool access to a Kubernetes cluster running in production.
 
 STRICT RULES — follow exactly:
@@ -499,6 +511,26 @@ Finish your response with a JSON object (raw, no markdown fences) structured exa
   "summary": "2-3 sentence explanation for the on-call engineer"
 }
 """
+    # Look for prompts/ relative to this file, then relative to cwd
+    for base in (os.path.dirname(os.path.abspath(__file__)), os.getcwd()):
+        candidate = os.path.join(base, "..", "prompts", "agent_system.md")
+        candidate = os.path.normpath(candidate)
+        if os.path.exists(candidate):
+            try:
+                raw = open(candidate, encoding="utf-8").read()
+                # Extract the fenced code block (``` ... ```) which contains the prompt
+                import re as _re
+                match = _re.search(r"^```\s*\n(.*?)^```", raw, _re.DOTALL | _re.MULTILINE)
+                if match:
+                    prompt = match.group(1).strip()
+                    log.info("Loaded system prompt from %s (%d chars)", candidate, len(prompt))
+                    return prompt
+            except Exception as exc:
+                log.warning("Could not load prompt file %s: %s — using inline", candidate, exc)
+    return _inline
+
+
+_SYSTEM = _load_system_prompt()
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
