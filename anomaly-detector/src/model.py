@@ -43,11 +43,21 @@ class AnomalyDetector:
             return False
 
         X = np.vstack(self.training_data)
-        self.model.fit(X)
-        self.is_trained = True
 
-        scores = self.model.score_samples(X)
-        self.threshold = float(np.quantile(scores, 0.02))
+        # Guard: IsolationForest degenerates on zero-variance data.
+        # If all features are constant (e.g. all-zero baseline), inject
+        # small synthetic noise so the model learns a meaningful boundary.
+        feature_std = X.std(axis=0)
+        if feature_std.max() < 1e-6:
+            noise = np.random.default_rng(42).normal(0, 0.01, X.shape)
+            X_train = X + noise
+        else:
+            X_train = X
+
+        self.model.fit(X_train)
+        self.is_trained = True
+        scores = self.model.score_samples(X_train)
+        self.threshold = float(np.quantile(scores, 0.05))  # 5th percentile
 
         self.baseline = {
             'error_rate':   float(X[:, 0].mean()),
@@ -56,7 +66,6 @@ class AnomalyDetector:
             'cpu_usage':    float(X[:, 3].mean()),
             'memory_usage': float(X[:, 4].mean()),
         }
-
         print(f"[{datetime.now(timezone.utc)}] Model trained on {len(self.training_data)} samples")
         print(f"[{datetime.now(timezone.utc)}] Baseline: {self.baseline}")
         print(f"[{datetime.now(timezone.utc)}] Dynamic threshold: {self.threshold:.3f}")
@@ -67,14 +76,11 @@ class AnomalyDetector:
             raise RuntimeError("Model is not trained yet")
         if features.ndim != 2 or features.shape[1] != 5:
             raise ValueError("features must be shape (1, 5)")
-
         score = float(self.model.score_samples(features)[0])
         is_anomaly = score < self.threshold
-
         anomaly_score_gauge.set(score)
         if is_anomaly:
             anomaly_detected_counter.inc()
-
         print(f"[{datetime.now(timezone.utc)}] score={score:.3f} "
               f"threshold={self.threshold:.3f} anomaly={is_anomaly}")
         return score, is_anomaly

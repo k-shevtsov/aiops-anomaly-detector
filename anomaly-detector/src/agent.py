@@ -415,7 +415,32 @@ def _tool_restart_deployment(
     incident_id: str = "",
 ) -> dict:
     # Delegate to existing healer — preserves cooldown, Prometheus metrics, locking
-    from healer import rollout_restart
+    # Use sys.path injection so this works both locally and in container (/app/src)
+    import sys as _sys
+    import os as _os
+    _src = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)))
+    if _src not in _sys.path:
+        _sys.path.insert(0, _src)
+    try:
+        from healer import rollout_restart
+    except ImportError:
+        # Fallback: perform restart directly via kubernetes SDK
+        log.warning("[%s] healer module not found — using direct K8s restart", incident_id)
+        try:
+            from kubernetes import client as k8s, config as k8s_cfg
+            from datetime import datetime, timezone
+            try:
+                k8s_cfg.load_incluster_config()
+            except Exception:
+                k8s_cfg.load_kube_config()
+            apps = k8s.AppsV1Api()
+            patch = {"spec": {"template": {"metadata": {"annotations": {
+                "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).isoformat()
+            }}}}}
+            apps.patch_namespaced_deployment(name=deployment, namespace=namespace, body=patch)
+            return {"success": True, "reason": reason, "method": "direct"}
+        except Exception as exc:
+            return {"success": False, "reason": reason, "error": str(exc)}
 
     log.info("[%s] Agent requesting restart — reason: %s", incident_id, reason)
     success = rollout_restart(
@@ -452,12 +477,19 @@ def _execute_tool(tool_name: str, tool_input: dict, incident_id: str) -> str:
 _SYSTEM = """\
 You are an autonomous SRE agent with tool access to a Kubernetes cluster running in production.
 
+STRICT RULES — follow exactly:
+- Make at most 3 tool calls per iteration. Do NOT call the same tool type more than twice in one turn.
+- After gathering initial evidence (iteration 1-2), move toward a conclusion.
+- By iteration 3, you must have enough data to write your final JSON summary.
+- Do NOT keep querying Prometheus for different metrics — pick the 2-3 most relevant queries and stop.
+
 When given an anomaly alert your workflow is:
-1. Call query_prometheus to get deeper metric context (error rates, latency percentiles, saturation).
-2. Call get_pod_logs to check for errors, OOM events, or stack traces.
-3. Call get_deployment_status to understand the current rollout state.
-4. Only call restart_deployment if evidence clearly supports it — log errors, crash loops,
-   or sustained metric degradation. If metrics are borderline, do NOT restart.
+1. Iteration 1: Call query_prometheus (max 2 queries) + get_pod_logs + get_deployment_status.
+2. Iteration 2: If needed, call query_prometheus (max 1 query) for historical context.
+3. Iteration 3+: Call restart_deployment if evidence supports it, then conclude.
+
+Only call restart_deployment if evidence clearly supports it — log errors, crash loops,
+or sustained metric degradation. If metrics are borderline, do NOT restart.
 
 Finish your response with a JSON object (raw, no markdown fences) structured exactly as:
 {
@@ -471,6 +503,11 @@ Finish your response with a JSON object (raw, no markdown fences) structured exa
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
+# Concurrency guard — one agent run at a time per process.
+# Prevents rate limit storms when anomalies fire faster than agent completes.
+_agent_running = threading.Event()
+
+
 def run_agent(
     score: float,
     threshold: float,
@@ -482,6 +519,7 @@ def run_agent(
     Run agentic anomaly analysis.
     Claude calls tools to gather evidence, then decides whether to heal.
     Falls back to a rule-based AgentResult if Claude is unavailable.
+    Skips if another agent run is already in progress (rate limit guard).
     """
     if not ANTHROPIC_API_KEY:
         log.warning("[%s] ANTHROPIC_API_KEY not set — agent fallback", incident_id)
@@ -490,6 +528,26 @@ def run_agent(
     if not _check_rate_limit():
         return _fallback_result(score, metrics, baseline)
 
+    # Skip if another agent is already running — avoids parallel 429s
+    if _agent_running.is_set():
+        log.info("[%s] Agent already running — skipping to avoid rate limit", incident_id)
+        return _fallback_result(score, metrics, baseline)
+
+    _agent_running.set()
+    try:
+        return _run_agent_inner(score, threshold, metrics, baseline, incident_id)
+    finally:
+        _agent_running.clear()
+
+
+def _run_agent_inner(
+    score: float,
+    threshold: float,
+    metrics: dict[str, float],
+    baseline: dict[str, float],
+    incident_id: str = "",
+) -> AgentResult:
+    """Inner agent logic — called only when no other agent is running."""
     agent_runs_total.inc()
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
