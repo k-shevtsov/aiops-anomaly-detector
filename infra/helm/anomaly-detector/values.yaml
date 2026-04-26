@@ -19,6 +19,7 @@ env:
   claudeModel: "claude-sonnet-4-5-20250929"
   maxClaudeCallsPerHour: "10"
   langfuseHost: "https://cloud.langfuse.com"
+  sqliteDbPath: "/data/incidents.db"
 
 secretName: anomaly-detector-secrets
 
