@@ -11,7 +11,7 @@ cryptography==46.0.6
 distro==1.9.0
 dnspython==2.8.0
 email-validator==2.3.0
-fastapi==0.111.0
+fastapi>=0.115.0
 fastapi-cli==0.0.24
 filelock==3.25.2
 fsspec==2026.3.0
@@ -74,3 +74,4 @@ watchfiles==1.1.1
 websocket-client==1.9.0
 websockets==16.0
 wrapt==1.17.3
+"mcp[cli]>=1.2.0"
