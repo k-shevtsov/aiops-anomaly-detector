@@ -10,6 +10,14 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from unittest.mock import MagicMock
+
+def _mock_query_solution(docs):
+    """Create a mock QuerySolution matching HippoRAG's real return type."""
+    qs = MagicMock()
+    qs.docs = docs
+    qs.doc_scores = [0.9 - i * 0.1 for i in range(len(docs))]
+    return qs
 
 # ensure src/ is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -79,9 +87,9 @@ class TestHippoRagStore:
     def test_retrieve_matches_by_incident_id_in_doc(self, tmp_path):
         store, mock_hippo = _make_store(tmp_path)
         store.store(_make_incident("inc-test-001"))
-        mock_hippo.retrieve.return_value = [[
-            {"text": "Incident inc-test-001 occurred at 2026-04-30", "score": 0.9}
-        ]]
+        mock_hippo.retrieve.return_value = [
+            _mock_query_solution(["Incident inc-test-001 occurred at 2026-04-30"])
+        ]
         results = store.retrieve("error rate high latency")
         assert len(results) == 1
         assert results[0].incident_id == "inc-test-001"
@@ -90,10 +98,9 @@ class TestHippoRagStore:
         store, mock_hippo = _make_store(tmp_path)
         for i in range(5):
             store.store(_make_incident(f"inc-{i:03d}"))
-        mock_hippo.retrieve.return_value = [[
-            {"text": f"Incident inc-{i:03d} occurred", "score": 0.9 - i * 0.1}
-            for i in range(5)
-        ]]
+        mock_hippo.retrieve.return_value = [
+            _mock_query_solution([f"Incident inc-{i:03d} occurred" for i in range(5)])
+        ]
         results = store.retrieve("error", k=2)
         assert len(results) <= 2
 
@@ -110,9 +117,9 @@ class TestHippoRagStore:
     def test_retrieve_as_few_shot_non_empty(self, tmp_path):
         store, mock_hippo = _make_store(tmp_path)
         store.store(_make_incident("inc-fs-001"))
-        mock_hippo.retrieve.return_value = [[
-            {"text": "Incident inc-fs-001 occurred", "score": 0.95}
-        ]]
+        mock_hippo.retrieve.return_value = [
+            _mock_query_solution(["Incident inc-fs-001 occurred"])
+        ]
         text = store.retrieve_as_few_shot("error rate")
         assert "similar past incident" in text
         assert "inc-fs-0" in text  # to_few_shot_text truncates id to 8 chars

@@ -5,16 +5,14 @@ Adds multi-hop knowledge graph retrieval on top of the existing RAG architecture
 Activated via: VECTOR_STORE=hipporag
 
 Dependencies:
-  - embedding-server running in shared-infra namespace (or localhost:8001)
-  - Ollama running with gemma2:9b model
+  - OPENAI_API_KEY env var (used by HippoRAG OpenIE for triplet extraction)
+  - facebook/contriever downloaded on first run (~400MB, cached locally)
 
 Config env vars:
-  HIPPO_SAVE_DIR       — where HippoRAG stores its graph (default: /data/hipporag)
-  HIPPO_LLM_MODEL      — Ollama model for OpenIE (default: gemma2:9b)
-  HIPPO_LLM_BASE_URL   — Ollama API URL (default: http://ollama:11434/v1)
-  HIPPO_EMBED_BASE_URL — embedding server URL
-  HIPPO_EMBED_MODEL    — model name (default: intfloat/e5-large-v2)
-  RAG_TOP_K            — number of results to retrieve (inherited from rag.py)
+  HIPPO_SAVE_DIR     — graph storage directory (default: /data/hipporag)
+  HIPPO_LLM_MODEL    — OpenAI model for OpenIE (default: gpt-4o-mini)
+  HIPPO_EMBED_MODEL  — embedding model (default: facebook/contriever, local)
+  RAG_TOP_K          — number of results to retrieve (inherited from rag.py)
 """
 
 from __future__ import annotations
@@ -28,15 +26,10 @@ from rag import Incident, IncidentStore, RAG_TOP_K
 
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
-HIPPO_SAVE_DIR     = os.getenv("HIPPO_SAVE_DIR",     "/data/hipporag")
-HIPPO_LLM_MODEL    = os.getenv("HIPPO_LLM_MODEL",    "gemma2:9b")
-HIPPO_LLM_BASE_URL = os.getenv("HIPPO_LLM_BASE_URL", "http://ollama:11434/v1")
-HIPPO_EMBED_BASE_URL = os.getenv(
-    "HIPPO_EMBED_BASE_URL",
-    "http://embedding-server.shared-infra.svc.cluster.local:8001/v1"
-)
-HIPPO_EMBED_MODEL  = os.getenv("HIPPO_EMBED_MODEL",  "intfloat/e5-large-v2")
+# ── Defaults (re-read at instantiation time via os.getenv in __init__) ────────
+_DEFAULT_SAVE_DIR    = "/data/hipporag"
+_DEFAULT_LLM_MODEL   = "gpt-4o-mini"
+_DEFAULT_EMBED_MODEL = "facebook/contriever"
 
 
 class HippoRagStore(IncidentStore):
@@ -47,10 +40,10 @@ class HippoRagStore(IncidentStore):
     subject->relation->object triplets, and uses Personalized PageRank
     for multi-hop retrieval.
 
-    This enables finding root causes that span multiple documents:
-    e.g. 'high latency' -> 'postgres replica lag' -> 'disk I/O saturation'.
+    OpenIE (triplet extraction) uses OpenAI API (gpt-4o-mini by default).
+    Results are cached in save_dir/openie_cache — no repeated API calls.
 
-    Implements the same IncidentStore interface as SqliteVecStore.
+    Embedding uses facebook/contriever — runs fully locally, no API needed.
     """
 
     def __init__(self):
@@ -61,27 +54,27 @@ class HippoRagStore(IncidentStore):
                 "HippoRAG backend requires: pip install hipporag"
             ) from exc
 
-        Path(HIPPO_SAVE_DIR).mkdir(parents=True, exist_ok=True)
+        # Read env vars at instantiation — allows test overrides via os.environ
+        save_dir    = os.getenv("HIPPO_SAVE_DIR",    _DEFAULT_SAVE_DIR)
+        llm_model   = os.getenv("HIPPO_LLM_MODEL",   _DEFAULT_LLM_MODEL)
+        embed_model = os.getenv("HIPPO_EMBED_MODEL",  _DEFAULT_EMBED_MODEL)
+
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
         self._incidents: dict[str, Incident] = {}
 
+        # No llm_base_url — uses OpenAI API directly
         self._hippo = HippoRAG(
-            save_dir             = HIPPO_SAVE_DIR,
-            llm_model_name       = f"ollama/{HIPPO_LLM_MODEL}",
-            llm_base_url         = HIPPO_LLM_BASE_URL,
-            llm_api_key          = "ollama",
-            embedding_model_name = HIPPO_EMBED_MODEL,
-            embedding_base_url   = HIPPO_EMBED_BASE_URL,
-            embedding_api_key    = "local",
+            save_dir             = save_dir,
+            llm_model_name       = llm_model,
+            embedding_model_name = embed_model,
         )
 
         log.info(
-            "HippoRagStore initialised (save_dir=%s, llm=%s)",
-            HIPPO_SAVE_DIR, HIPPO_LLM_MODEL,
+            "HippoRagStore initialised (save_dir=%s, llm=%s, embed=%s)",
+            save_dir, llm_model, embed_model,
         )
-
-    # ── helpers ───────────────────────────────────────────────────────────────
 
     def _incident_to_doc(self, incident: Incident) -> str:
         """Convert an Incident to a rich text document for indexing."""
@@ -98,8 +91,6 @@ class HippoRagStore(IncidentStore):
             f"Healing performed: {'yes' if incident.healing_performed else 'no'}."
             + (f" Resolution: {incident.resolution}." if incident.resolution else "")
         )
-
-    # ── public API ────────────────────────────────────────────────────────────
 
     def store(self, incident: Incident) -> None:
         """
@@ -138,14 +129,25 @@ class HippoRagStore(IncidentStore):
                     queries=[query_text],
                     num_to_retrieve=k,
                 )
-                retrieved_docs = results[0] if results else []
+                retrieved_docs = results[0] if results else None
+            except AssertionError as exc:
+                # Graph has no matching phrases — fall back to most recent incidents
+                log.warning("HippoRagStore graph lookup failed (%s) — using recency fallback", exc)
+                retrieved_docs = None
             except Exception as exc:
                 log.error("HippoRagStore retrieve failed: %s", exc)
                 return []
 
+            if retrieved_docs is None:
+                # Fallback: return most recently stored incidents
+                recent = list(self._incidents.values())[-k:]
+                log.info("HippoRagStore fallback: returning %d recent incidents", len(recent))
+                return recent
+
+        # retrieved_docs is a QuerySolution object with .docs (list[str]) and .doc_scores
         incidents: list[Incident] = []
-        for item in retrieved_docs[:k]:
-            doc_text = item.get("text", "")
+        docs_list = retrieved_docs.docs if hasattr(retrieved_docs, "docs") else []
+        for doc_text in docs_list[:k]:
             for inc_id, inc in self._incidents.items():
                 if inc_id in doc_text:
                     incidents.append(inc)
