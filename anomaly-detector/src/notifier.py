@@ -13,6 +13,7 @@ import time
 import threading
 from collections import defaultdict
 
+TELEGRAM_MAX_LENGTH = 4096  # Telegram API hard limit
 import requests
 from prometheus_client import Counter
 
@@ -55,6 +56,10 @@ def send_telegram(message: str, incident_id: str = "") -> bool:
         log.warning("[%s] Telegram credentials not set — skipping send", incident_id)
         return False
 
+    # Truncate to Telegram API limit
+    if len(message) > TELEGRAM_MAX_LENGTH:
+        message = message[:TELEGRAM_MAX_LENGTH - 1] + "…"
+
     notify_total.inc()
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -69,7 +74,7 @@ def send_telegram(message: str, incident_id: str = "") -> bool:
         )
         resp.raise_for_status()
         return True
-    except requests.RequestException as exc:
+    except Exception as exc:
         notify_errors.inc()
         log.error("[%s] Telegram send failed: %s", incident_id, exc)
         return False

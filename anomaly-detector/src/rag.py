@@ -498,6 +498,9 @@ def get_store() -> IncidentStore:
             _store_instance = SqliteVecStore()
         elif backend == "pgvector":
             _store_instance = PgVectorStore()
+        elif backend == "hipporag":
+            from rag_hippo import HippoRagStore
+            _store_instance = HippoRagStore()
         else:
             raise ValueError(f"Unknown VECTOR_STORE: {backend!r}")
 
